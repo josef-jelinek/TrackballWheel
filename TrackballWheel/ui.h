@@ -1,0 +1,4 @@
+
+#define ICON_ACTIVE_RID 100
+#define ICON_INACTIVE_RID 101
+#define DIALOG_RID 102
