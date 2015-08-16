@@ -3,9 +3,15 @@
 
 const int tray_icon_id = 1;
 const int tray_message_id = WM_APP;
+const int button_filter_delay_ms = 100;
 
 HHOOK mouse_hook;
 bool is_deactivated = false;
+bool is_pressed = false;
+bool is_scrolling = false;
+POINT origin;
+UINT_PTR start_scroll_timer_id = 0;
+UINT_PTR end_scroll_timer_id = 0;
 NOTIFYICONDATA tray_icon_data;
 HICON active_icon, inactive_icon;
 
@@ -30,54 +36,86 @@ void delete_tray_icon() {
   Shell_NotifyIcon(NIM_DELETE, &tray_icon_data);
 }
 
+void send_mouse_click() {
+  INPUT input[2];
+  input[0].type = input[1].type = INPUT_MOUSE;
+  input[0].mi.dx = input[1].mi.dx = origin.x;
+  input[0].mi.dy = input[1].mi.dy = origin.y;
+  input[0].mi.mouseData = input[1].mi.mouseData = 0;
+  input[0].mi.dwFlags = MOUSEEVENTF_MIDDLEDOWN;
+  input[1].mi.dwFlags = MOUSEEVENTF_MIDDLEUP;
+  input[0].mi.time = input[1].mi.time = 0;
+  input[0].mi.dwExtraInfo = input[1].mi.dwExtraInfo = 0;
+  SendInput(2, input, sizeof INPUT);
+}
+
+void send_mouse_scroll(POINT pt) {
+  int dx = origin.x - pt.x;
+  int dy = origin.y - pt.y;
+  // prefer vertical scrolling
+  if (abs(dy) > abs(dx)) {
+    dx = 0;
+  }
+  INPUT input[2];
+  input[0].type = input[1].type = INPUT_MOUSE;
+  input[0].mi.dx = input[1].mi.dx = pt.x;
+  input[0].mi.dy = input[1].mi.dy = pt.y;
+  input[0].mi.mouseData = 10 * dx;
+  input[1].mi.mouseData = 10 * dy;
+  input[0].mi.dwFlags = MOUSEEVENTF_HWHEEL;
+  input[1].mi.dwFlags = MOUSEEVENTF_WHEEL;
+  input[0].mi.time = input[1].mi.time = 0;
+  input[0].mi.dwExtraInfo = input[1].mi.dwExtraInfo = 0;
+  SendInput(2, input, sizeof INPUT);
+}
+
+void cancel_end_scroll() {
+  if (end_scroll_timer_id != 0 && KillTimer(nullptr, end_scroll_timer_id)) {
+    end_scroll_timer_id = 0;
+  }
+}
+
+void CALLBACK handle_end_scroll(HWND, UINT, UINT_PTR, DWORD) {
+  cancel_end_scroll();
+  if (end_scroll_timer_id == 0) {
+    if (is_pressed && !is_scrolling) {
+      // if the middle button was not used for scrolling, make it click
+      send_mouse_click();
+    }
+    is_pressed = is_scrolling = false;
+  }
+}
+
+void schedule_end_scroll() {
+  cancel_end_scroll();
+  if (end_scroll_timer_id == 0) {
+    end_scroll_timer_id = SetTimer(nullptr, 0, button_filter_delay_ms, handle_end_scroll);
+  }
+}
+
 LRESULT CALLBACK mouse_handler(int message_id, WPARAM event_id, LPARAM data) {
-  static bool is_pressed = false;
-  static bool is_scrolling = false;
-  static POINT origin;
   if (!is_deactivated && message_id == HC_ACTION) {
-    const MSLLHOOKSTRUCT * event_data = reinterpret_cast<const MSLLHOOKSTRUCT *>(data);
     if (event_id == WM_MBUTTONDOWN) {
-      is_pressed = true;
-      is_scrolling = false;
-      origin = event_data->pt;
+      if (is_pressed) {
+        // continue scrolling like there is no tomorrow
+        cancel_end_scroll();
+      } else {
+        // fresh middle button down 
+        is_pressed = true;
+        is_scrolling = false;
+        origin = reinterpret_cast<const MSLLHOOKSTRUCT *>(data)->pt;
+      }
       return 1;
     }
     if (event_id == WM_MBUTTONUP) {
-      if (is_pressed && !is_scrolling) {
-        INPUT input[2];
-        input[0].type = input[1].type = INPUT_MOUSE;
-        input[0].mi.dx = input[1].mi.dx = event_data->pt.x;
-        input[0].mi.dy = input[1].mi.dy = event_data->pt.y;
-        input[0].mi.mouseData = input[1].mi.mouseData = 0;
-        input[0].mi.dwFlags = MOUSEEVENTF_MIDDLEDOWN;
-        input[1].mi.dwFlags = MOUSEEVENTF_MIDDLEUP;
-        input[0].mi.time = input[1].mi.time = 0;
-        input[0].mi.dwExtraInfo = input[1].mi.dwExtraInfo = 0;
-        SendInput(2, input, sizeof INPUT);
-      }
-      is_pressed = is_scrolling = false;
+      // tentatively end scrolling to filter accidental fast middle button ups and downs
+      schedule_end_scroll();
       return 1;
     }
     if (event_id == WM_MOUSEMOVE && is_pressed) {
       is_scrolling = true;
       SetCursorPos(origin.x, origin.y);
-      int dx = origin.x - event_data->pt.x;
-      int dy = origin.y - event_data->pt.y;
-      // prefer vertical scrolling
-      if (abs(dy) > abs(dx)) {
-        dx = 0;
-      }
-      INPUT input[2];
-      input[0].type = input[1].type = INPUT_MOUSE;
-      input[0].mi.dx = input[1].mi.dx = event_data->pt.x;
-      input[0].mi.dy = input[1].mi.dy = event_data->pt.y;
-      input[0].mi.mouseData = 10 * dx;
-      input[1].mi.mouseData = 10 * dy;
-      input[0].mi.dwFlags = MOUSEEVENTF_HWHEEL;
-      input[1].mi.dwFlags = MOUSEEVENTF_WHEEL;
-      input[0].mi.time = input[1].mi.time = 0;
-      input[0].mi.dwExtraInfo = input[1].mi.dwExtraInfo = 0;
-      SendInput(2, input, sizeof INPUT);
+      send_mouse_scroll(reinterpret_cast<const MSLLHOOKSTRUCT *>(data)->pt);
       return 1;
     }
   }
@@ -86,7 +124,7 @@ LRESULT CALLBACK mouse_handler(int message_id, WPARAM event_id, LPARAM data) {
 
 INT_PTR CALLBACK dialog_handler(HWND window_handle, UINT message_id, WPARAM, LPARAM lParam) {
   if (message_id == tray_message_id) {
-    if (lParam == WM_MBUTTONDBLCLK) {
+    if (lParam == WM_LBUTTONDBLCLK) {
       DestroyWindow(window_handle);
     } else if (lParam == WM_LBUTTONDOWN) {
       is_deactivated = !is_deactivated;
@@ -108,7 +146,7 @@ HICON load_icon(HINSTANCE instance_handle, int resource_id) {
     LR_DEFAULTCOLOR);
 }
 
-int APIENTRY wWinMain(HINSTANCE instance_handle, HINSTANCE, LPTSTR pCmdLine, int nCmdShow) {
+int APIENTRY wWinMain(HINSTANCE instance_handle, HINSTANCE, LPTSTR, int) {
   mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, mouse_handler, instance_handle, 0);
   if (mouse_hook == nullptr) {
     return 1;
@@ -126,5 +164,5 @@ int APIENTRY wWinMain(HINSTANCE instance_handle, HINSTANCE, LPTSTR pCmdLine, int
   }
   delete_tray_icon();
   UnhookWindowsHookEx(mouse_hook);
-  return msg.wParam;
+  return (int)msg.wParam;
 }
