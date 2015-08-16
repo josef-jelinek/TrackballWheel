@@ -8,12 +8,12 @@ josef.jelinek@gmail.com
 
 ####Usage
 * Adds a ball icon to a taskbar notification area (tray).
-* Left-button click on the acon switches whether the emulation is enabled.
-* Middle-button double-click exits the application.
+* Left-button click on the icon switches whether the emulation is enabled.
+* Left-button double-click on the icon exits the utility.
 
 ####Requirements
 * Trackball with a middle button.
-* Tested on Microsoft Windows 8.1.
+* Works on Microsoft Windows 10 and older.
 * Compilable with MS Visual Studio 2013 (Express).
 
 ####Credits
