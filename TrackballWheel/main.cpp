@@ -3,15 +3,17 @@
 
 const int tray_icon_id = 1;
 const int tray_message_id = WM_APP;
-const int button_filter_delay_ms = 100;
+const int too_fast_click_ms = 30;
+const int too_slow_click_ms = 300;
 
 HHOOK mouse_hook;
 bool is_deactivated = false;
 bool is_pressed = false;
 bool is_scrolling = false;
+bool is_fresh = true;
 POINT origin;
-UINT_PTR start_scroll_timer_id = 0;
-UINT_PTR end_scroll_timer_id = 0;
+FILETIME last_button_down_time = { 0, 0 };
+FILETIME last_button_up_time = { 0, 0 };
 NOTIFYICONDATA tray_icon_data;
 HICON active_icon, inactive_icon;
 
@@ -46,7 +48,7 @@ void send_mouse_click() {
   input[1].mi.dwFlags = MOUSEEVENTF_MIDDLEUP;
   input[0].mi.time = input[1].mi.time = 0;
   input[0].mi.dwExtraInfo = input[1].mi.dwExtraInfo = 0;
-  SendInput(2, input, sizeof INPUT);
+  SendInput(2, &input[0], sizeof INPUT);
 }
 
 void send_mouse_scroll(POINT pt) {
@@ -66,57 +68,57 @@ void send_mouse_scroll(POINT pt) {
   input[1].mi.dwFlags = MOUSEEVENTF_WHEEL;
   input[0].mi.time = input[1].mi.time = 0;
   input[0].mi.dwExtraInfo = input[1].mi.dwExtraInfo = 0;
-  SendInput(2, input, sizeof INPUT);
+  SendInput(2, &input[0], sizeof INPUT);
 }
 
-void cancel_end_scroll() {
-  if (end_scroll_timer_id != 0 && KillTimer(nullptr, end_scroll_timer_id)) {
-    end_scroll_timer_id = 0;
-  }
+int get_time(LPFILETIME new_time, FILETIME old_time) {
+  GetSystemTimePreciseAsFileTime(new_time);
+  ULARGE_INTEGER new_value, old_value;
+  new_value.HighPart = new_time->dwHighDateTime;
+  new_value.LowPart = new_time->dwLowDateTime;
+  old_value.HighPart = old_time.dwHighDateTime;
+  old_value.LowPart = old_time.dwLowDateTime;
+  ULONGLONG d = (new_value.QuadPart - old_value.QuadPart) / 10000;
+  return d > MAXINT ? MAXINT : (int)d;
 }
 
-void CALLBACK handle_end_scroll(HWND, UINT, UINT_PTR, DWORD) {
-  cancel_end_scroll();
-  if (end_scroll_timer_id == 0) {
-    if (is_pressed && !is_scrolling) {
-      // if the middle button was not used for scrolling, make it click
-      send_mouse_click();
-    }
-    is_pressed = is_scrolling = false;
-  }
-}
-
-void schedule_end_scroll() {
-  cancel_end_scroll();
-  if (end_scroll_timer_id == 0) {
-    end_scroll_timer_id = SetTimer(nullptr, 0, button_filter_delay_ms, handle_end_scroll);
-  }
-}
-
-LRESULT CALLBACK mouse_handler(int message_id, WPARAM event_id, LPARAM data) {
+LRESULT CALLBACK event_handler(int message_id, WPARAM event_id, LPARAM data) {
   if (!is_deactivated && message_id == HC_ACTION) {
     if (event_id == WM_MBUTTONDOWN) {
-      if (is_pressed) {
-        // continue scrolling like there is no tomorrow
-        cancel_end_scroll();
-      } else {
-        // fresh middle button down 
+      if (is_fresh) {
         is_pressed = true;
-        is_scrolling = false;
-        origin = reinterpret_cast<const MSLLHOOKSTRUCT *>(data)->pt;
+        FILETIME time;
+        int up_down_ms = get_time(&time, last_button_up_time);
+        if (!is_scrolling || up_down_ms > too_fast_click_ms) {
+          is_scrolling = false;
+          origin = reinterpret_cast<const MSLLHOOKSTRUCT *>(data)->pt;
+        }
+        last_button_down_time = time;
+        return 1;
       }
-      return 1;
     }
     if (event_id == WM_MBUTTONUP) {
-      // tentatively end scrolling to filter accidental fast middle button ups and downs
-      schedule_end_scroll();
-      return 1;
+      if (is_fresh) {
+        is_pressed = false;
+        FILETIME time;
+        int down_up_ms = get_time(&time, last_button_down_time);
+        if (!is_scrolling && down_up_ms > too_fast_click_ms && down_up_ms < too_slow_click_ms) {
+          is_fresh = false;
+          send_mouse_click();
+        }
+        last_button_up_time = time;
+        return 1;
+      } else {
+        is_fresh = true;
+      }
     }
-    if (event_id == WM_MOUSEMOVE && is_pressed) {
-      is_scrolling = true;
-      SetCursorPos(origin.x, origin.y);
-      send_mouse_scroll(reinterpret_cast<const MSLLHOOKSTRUCT *>(data)->pt);
-      return 1;
+    if (event_id == WM_MOUSEMOVE) {
+      if (is_pressed) {
+        is_scrolling = true;
+        SetCursorPos(origin.x, origin.y);
+        send_mouse_scroll(reinterpret_cast<const MSLLHOOKSTRUCT *>(data)->pt);
+        return 1;
+      }
     }
   }
   return CallNextHookEx(mouse_hook, message_id, event_id, data);
@@ -147,7 +149,7 @@ HICON load_icon(HINSTANCE instance_handle, int resource_id) {
 }
 
 int APIENTRY wWinMain(HINSTANCE instance_handle, HINSTANCE, LPTSTR, int) {
-  mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, mouse_handler, instance_handle, 0);
+  mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, event_handler, instance_handle, 0);
   if (mouse_hook == nullptr) {
     return 1;
   }
